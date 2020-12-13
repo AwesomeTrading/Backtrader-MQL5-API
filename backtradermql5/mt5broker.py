@@ -58,6 +58,9 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self.opending = collections.defaultdict(list)  # pending transmission
         self.brackets = dict()  # confirmed brackets
 
+        self._ocos = dict()
+        self._ocol = collections.defaultdict(list)
+
         self.startingcash = self.cash = 0.0
         self.startingvalue = self.value = 0.0
         self.positions = collections.defaultdict(Position)
@@ -161,23 +164,28 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         order = self.orders[oref]
         order.reject(self)
         self.notify(order)
+        self._bracketize(order, cancel=True)
+        self._ococheck(order)
 
     def _accept(self, oref):
         order = self.orders[oref]
         order.accept()
         self.notify(order)
+        self._ococheck(order)
 
     def _cancel(self, oref):
         order = self.orders[oref]
         order.cancel()
         self.notify(order)
         self._bracketize(order, cancel=True)
+        self._ococheck(order)
 
     def _expire(self, oref):
         order = self.orders[oref]
         order.expire()
         self.notify(order)
         self._bracketize(order, cancel=True)
+        self._ococheck(order)
 
     def _bracketize(self, order, cancel=False):
         pref = getattr(order.parent, "ref", order.ref)  # parent ref or self
@@ -200,6 +208,23 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             for o in br:
                 if o.alive():
                     self._cancel(o.ref)
+
+    def _ococheck(self, order):
+        ocoref = self._ocos.get(order.ref, order.ref) # a parent or self
+        ocol = self._ocol.pop(ocoref, None)
+        if ocol:
+            for oref in ocol:
+                self._cancel(oref)
+
+    def _ocoize(self, order, oco):
+        if oco is None:
+            return
+
+        ocoref = oco.ref
+        oref = order.ref
+        if ocoref not in self._ocos:
+            self._ocos[ocoref] = ocoref
+        self._ocol[ocoref].append(oref)  # add to group
 
     def _fill_external(self, data, size, price):
         if size == 0:
@@ -347,6 +372,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
         order.addinfo(**kwargs)
         order.addcomminfo(self.getcommissioninfo(data))
+        self._ocoize(order, oco)
         return self._transmit(order)
 
     def sell(
@@ -384,6 +410,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
         order.addinfo(**kwargs)
         order.addcomminfo(self.getcommissioninfo(data))
+        self._ocoize(order, oco)
         return self._transmit(order)
 
     def cancel(self, order):
