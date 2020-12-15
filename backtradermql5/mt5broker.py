@@ -301,13 +301,13 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
             # order type SELL, then stop and limit type BUY
             if stop_order.size > 0 and limit_order.size > 0:
-                if price >= limit_order.price:  # Buy ask price, so price > limit price
+                if price <= limit_order.price:  # Limit order trigger when ask price under limit price
                     order = limit_order
                 else:
                     order = stop_order
             # order type BUY, then stop and limit type SELL
             else:
-                if price <= limit_order.price:  # Sell bid price, so price < limit price
+                if price >= limit_order.price:  # Limit order trigger when bid price over limit price
                     order = limit_order
                 else:
                     order = stop_order
