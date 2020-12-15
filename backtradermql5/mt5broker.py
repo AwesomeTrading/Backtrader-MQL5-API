@@ -253,7 +253,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self._ocol[ocoref].append(oref)  # add to group
 
     def _fill_external(self, data, size, price):
-        logger.debug("Fill external order", data, size, price)
+        logger.debug("Fill external order: {}, {}, {}", data, size, price)
         if size == 0:
             return
 
@@ -281,7 +281,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
     def _fill(self, oref, size, price, filled=False, **kwargs):
         if size == 0 and not filled:
             return
-        logger.debug("Fill order", oref, size, price)
+        logger.debug("Fill order: {}, {}, {}", oref, size, price)
 
         order = self.orders[oref]
         if not order.alive():  # can be a bracket

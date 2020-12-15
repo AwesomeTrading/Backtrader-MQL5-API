@@ -114,7 +114,7 @@ class MTraderAPI:
             self.sys_socket.send_json(data)
             msg = self.sys_socket.recv_string()
 
-            logger.debug("ZMQ SYS REQUEST: ", data, " -> ", msg)
+            logger.debug("ZMQ SYS REQUEST: {} -> {}", data, msg)
             # terminal received the request
             assert msg == "OK", "Something wrong on server side"
         except AssertionError as err:
@@ -128,7 +128,7 @@ class MTraderAPI:
             msg = self.data_socket.recv_json()
         except zmq.ZMQError:
             raise zmq.NotDone("Data socket timeout ERROR")
-        logger.debug("ZMQ DATA REPLY: ", msg)
+        logger.debug("ZMQ DATA REPLY: {}", msg)
         return msg
 
     def _indicator_pull_reply(self):
@@ -137,7 +137,7 @@ class MTraderAPI:
             msg = self.indicator_data_socket.recv_json()
         except zmq.ZMQError:
             raise zmq.NotDone("Indicator Data socket timeout ERROR")
-        logger.debug("ZMQ INDICATOR DATA REPLY: ", msg)
+        logger.debug("ZMQ INDICATOR DATA REPLY: {}", msg)
         return msg
 
     def live_socket(self, context=None):
@@ -164,7 +164,7 @@ class MTraderAPI:
         """Send message for chart control to server via ZeroMQ chart data socket"""
 
         try:
-            logger.debug("ZMQ PUSH CHART DATA: ", data, " -> ", data)
+            logger.debug("ZMQ PUSH CHART DATA: {}", data)
             self.chart_data_socket.send_json(data)
         except zmq.ZMQError:
             raise zmq.NotDone("Sending request ERROR")
@@ -407,7 +407,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # if positions["error"]:
         #     raise ServerDataError(positions)
         pos_list = positions.get("positions", [])
-        logger.debug("Open positions: {}.".format(pos_list))
+        logger.debug("Open positions: {}".format(pos_list))
         return [PositionAdapter(o) for o in pos_list]
 
     def get_granularity(self, frame, compression):
@@ -454,7 +454,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         while True:
             try:
                 last_data = socket.recv_json()
-                logger.debug("ZMQ LIVE DATA: ", last_data)
+                logger.debug("ZMQ LIVE DATA: {}", last_data)
             except zmq.ZMQError:
                 raise zmq.NotDone("Live data ERROR")
 
@@ -466,7 +466,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         while True:
             try:
                 transaction = socket.recv_json()
-                logger.debug("ZMQ STREAMING TRANSACTION: ", transaction)
+                logger.debug("ZMQ STREAMING TRANSACTION: {}", transaction)
             except zmq.ZMQError:
                 raise zmq.NotDone("Streaming data ERROR")
 
@@ -682,8 +682,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             logger.error(conf)
             raise ServerDataError(conf)
 
-        for key, value in conf.items():
-            logger.info(key, value, sep=" - ")
+        logger.info(conf)
 
     def close_position(self, oid, symbol):
         logger.debug("Closing position: {}, on symbol: {}".format(oid, symbol))
