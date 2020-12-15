@@ -2,19 +2,18 @@ from __future__ import absolute_import, division, print_function, unicode_litera
 
 import zmq
 import collections
-from datetime import datetime
 import threading
-
-from backtradermql5.adapter import PositionAdapter
+import logging
+from datetime import datetime
 
 import backtrader as bt
 from backtrader.metabase import MetaParams
 from backtrader.utils.py3 import queue, with_metaclass
 from backtrader import date2num, num2date
 
-import random
-import json
+from backtradermql5.adapter import PositionAdapter
 
+logger = logging.getLogger("MT5Store")
 
 class MTraderError(Exception):
     def __init__(self, *args, **kwargs):
@@ -71,7 +70,6 @@ class MTraderAPI:
         self.EVENTS_PORT = 15558  # PUSH/PULL port
         self.INDICATOR_DATA_PORT = 15559  # REP/REQ port
         self.CHART_DATA_PORT = 15560  # PUSH port
-        self.debug = kwargs["debug"]
 
         # ZeroMQ timeout in seconds
         sys_timeout = 1
@@ -85,12 +83,14 @@ class MTraderAPI:
             self.sys_socket = context.socket(zmq.REQ)
             # set port timeout
             self.sys_socket.RCVTIMEO = sys_timeout * 1000
-            self.sys_socket.connect("tcp://{}:{}".format(self.HOST, self.SYS_PORT))
+            self.sys_socket.connect(
+                "tcp://{}:{}".format(self.HOST, self.SYS_PORT))
 
             self.data_socket = context.socket(zmq.PULL)
             # set port timeout
             self.data_socket.RCVTIMEO = data_timeout * 1000
-            self.data_socket.connect("tcp://{}:{}".format(self.HOST, self.DATA_PORT))
+            self.data_socket.connect(
+                "tcp://{}:{}".format(self.HOST, self.DATA_PORT))
 
             self.indicator_data_socket = context.socket(zmq.PULL)
             # set port timeout
@@ -114,8 +114,7 @@ class MTraderAPI:
             self.sys_socket.send_json(data)
             msg = self.sys_socket.recv_string()
 
-            if self.debug:
-                print("ZMQ SYS REQUEST: ", data, " -> ", msg)
+            logger.debug("ZMQ SYS REQUEST: ", data, " -> ", msg)
             # terminal received the request
             assert msg == "OK", "Something wrong on server side"
         except AssertionError as err:
@@ -129,8 +128,7 @@ class MTraderAPI:
             msg = self.data_socket.recv_json()
         except zmq.ZMQError:
             raise zmq.NotDone("Data socket timeout ERROR")
-        if self.debug:
-            print("ZMQ DATA REPLY: ", msg)
+        logger.debug("ZMQ DATA REPLY: ", msg)
         return msg
 
     def _indicator_pull_reply(self):
@@ -139,8 +137,7 @@ class MTraderAPI:
             msg = self.indicator_data_socket.recv_json()
         except zmq.ZMQError:
             raise zmq.NotDone("Indicator Data socket timeout ERROR")
-        if self.debug:
-            print("ZMQ INDICATOR DATA REPLY: ", msg)
+        logger.debug("ZMQ INDICATOR DATA REPLY: ", msg)
         return msg
 
     def live_socket(self, context=None):
@@ -167,8 +164,7 @@ class MTraderAPI:
         """Send message for chart control to server via ZeroMQ chart data socket"""
 
         try:
-            if self.debug:
-                print("ZMQ PUSH CHART DATA: ", data, " -> ", data)
+            logger.debug("ZMQ PUSH CHART DATA: ", data, " -> ", data)
             self.chart_data_socket.send_json(data)
         except zmq.ZMQError:
             raise zmq.NotDone("Sending request ERROR")
@@ -276,7 +272,8 @@ class MetaSingleton(MetaParams):
 
     def __call__(cls, *args, **kwargs):
         if cls._singleton is None:
-            cls._singleton = super(MetaSingleton, cls).__call__(*args, **kwargs)
+            cls._singleton = super(
+                MetaSingleton, cls).__call__(*args, **kwargs)
 
         return cls._singleton
 
@@ -295,7 +292,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
     BrokerCls = None  # broker class will autoregister
     DataCls = None  # data class will auto register
 
-    params = (("host", "localhost"), ("debug", False), ("datatimeout", 10))
+    params = (("host", "localhost"), ("datatimeout", 10))
 
     _DTEPOCH = datetime(1970, 1, 1)
 
@@ -356,7 +353,6 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         kwargs.update(
             {
                 "host": self.params.host,
-                "debug": self.params.debug,
                 "datatimeout": self.params.datatimeout,
             }
         )
@@ -368,8 +364,6 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         self.q_livedata = queue.Queue()
 
         self._cancel_flag = False
-
-        self.debug = self.params.debug
 
         # Clear any previous subscribed Symbols
         self.reset_server()
@@ -413,8 +407,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # if positions["error"]:
         #     raise ServerDataError(positions)
         pos_list = positions.get("positions", [])
-        if self.debug:
-            print("Open positions: {}.".format(pos_list))
+        logger.debug("Open positions: {}.".format(pos_list))
         return [PositionAdapter(o) for o in pos_list]
 
     def get_granularity(self, frame, compression):
@@ -461,8 +454,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         while True:
             try:
                 last_data = socket.recv_json()
-                # if self.debug:
-                print("ZMQ LIVE DATA: ", last_data)
+                logger.debug("ZMQ LIVE DATA: ", last_data)
             except zmq.ZMQError:
                 raise zmq.NotDone("Live data ERROR")
 
@@ -474,8 +466,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         while True:
             try:
                 transaction = socket.recv_json()
-                if self.debug:
-                    print("ZMQ STREAMING TRANSACTION: ", transaction)
+                logger.debug("ZMQ STREAMING TRANSACTION: ", transaction)
             except zmq.ZMQError:
                 raise zmq.NotDone("Streaming data ERROR")
 
@@ -521,15 +512,15 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # if order.exectype == bt.Order.StopTrail:
         #     okwargs['distance'] = order.trailamount
 
-        okwargs["comment"] = dict()
+        # okwargs["comment"] = dict()
 
         if stopside is not None and stopside.price is not None:
             okwargs["stoploss"] = stopside.price
-            okwargs["comment"]["stopside"] = stopside.ref
+            # okwargs["comment"]["stopside"] = stopside.ref
 
         if takeside is not None and takeside.price is not None:
             okwargs["takeprofit"] = takeside.price
-            okwargs["comment"]["takeside"] = takeside.ref
+            # okwargs["comment"]["takeside"] = takeside.ref
 
         # set store backtrader order ref as MT5 order magic number
         okwargs["magic"] = order.ref
@@ -537,12 +528,12 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         okwargs.update(**kwargs)  # anything from the user
         self.q_ordercreate.put((order.ref, okwargs,))
 
-        # notify orders of being submitted
-        self.broker._submit(order.ref)
-        if stopside is not None and stopside.price is not None:
-            self.broker._submit(stopside.ref)
-        if takeside is not None and takeside.price is not None:
-            self.broker._submit(takeside.ref)
+        # # notify orders of being submitted
+        # self.broker._submit(order.ref)
+        # if stopside is not None and stopside.price is not None:
+        #     self.broker._submit(stopside.ref)
+        # if takeside is not None and takeside.price is not None:
+        #     self.broker._submit(takeside.ref)
 
         return order
 
@@ -559,20 +550,19 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             except Exception as e:
                 self.put_notification(e)
                 self.broker._reject(oref)
-                return
+                continue
 
-            if self.debug:
-                print(o)
+            logger.debug(o)
 
             if o["error"]:
                 self.put_notification(o["desription"])
                 self.broker._reject(oref)
-                return
+                continue
             else:
                 oid = o["order"]
 
             self._orders[oref] = oid
-            self.broker._submit(oref)
+            # self.broker._submit(oref)
 
             # keeps orders types
             self._orders_type[oref] = okwargs["actionType"]
@@ -591,6 +581,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
             oid = self._orders.get(oref, None)
             if oid is None:
+                logger.debug("Cannot cancel order ref: {}".format(oref))
                 continue  # the order is no longer there
 
             # get symbol name
@@ -605,11 +596,12 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
                 else:
                     self.cancel_order(oid, symbol)
             except Exception as e:
-                self.put_notification("Order not cancelled: {}, {}".format(oid, e))
+                self.put_notification(
+                    "Order not cancelled: {}, {}".format(oid, e))
                 continue
 
             self._cancel_flag = True
-            self.broker._cancel(oref)
+            # self.broker._cancel(oref)
 
     def price_data(
         self, dataname, dtbegin, dtend, timeframe, compression, include_first=False
@@ -622,8 +614,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         if dtend:
             end = int((dtbegin - self._DTEPOCH).total_seconds())
 
-        if self.debug:
-            print(
+        logger.debug(
                 "Fetching: {}, Timeframe: {}, Fromdate: {}".format(
                     dataname, tf, dtbegin
                 )
@@ -662,9 +653,9 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         #   except queue.Empty:
         #     return None
         #   if msg['type'] == "FLUSH":
-        #     print(msg['data'], end="\r", flush=True)
+        #     logger.debug(msg['data'], end="\r", flush=True)
         #   else:
-        #     print(msg['data'])
+        #     logger.debug(msg['data'])
 
         #   if msg['status']=='DISCONNECTED':
         #     return
@@ -678,7 +669,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise ServerConfigError(ret_val["description"])
             self.put_notification(ret_val["description"])
 
@@ -688,107 +679,104 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         # Error handling
         if conf["error"]:
+            logger.error(conf)
             raise ServerDataError(conf)
 
         for key, value in conf.items():
-            print(key, value, sep=" - ")
+            logger.info(key, value, sep=" - ")
 
     def close_position(self, oid, symbol):
-        if self.debug:
-            print("Closing position: {}, on symbol: {}".format(oid, symbol))
+        logger.debug("Closing position: {}, on symbol: {}".format(oid, symbol))
 
         conf = self.oapi.construct_and_send(
             action="TRADE", actionType="POSITION_CLOSE_ID", symbol=symbol, id=oid
         )
-        print(conf)
         # Error handling
         if conf["error"]:
+            logger.error(conf)
             raise ServerDataError(conf)
+        logger.debug(conf)
 
     def cancel_order(self, oid, symbol):
-        if self.debug:
-            print("Cancelling order: {}, on symbol: {}".format(oid, symbol))
+        logger.debug("Cancelling order: {}, on symbol: {}".format(oid, symbol))
 
         conf = self.oapi.construct_and_send(
             action="TRADE", actionType="ORDER_CANCEL", symbol=symbol, id=oid
         )
-        print(conf)
         # Error handling
         if conf["error"]:
+            logger.error(conf)
             raise ServerDataError(conf)
+        logger.debug(conf)
 
-    def _transaction(self, trans):
-        oid = oref = None
-
-        try:
-            request, reply = trans.values()
-        except KeyError:
-            raise KeyError(trans)
-
-        # Update balance after transaction
-        # self.get_balance()
-
-        if self.debug:
-            print(request, reply, sep="\n")
-
-        if request["action"] == "TRADE_ACTION_DEAL":
-            # get order id (matches transaction id)
-            oid = request["order"]
-        elif request["action"] == "TRADE_ACTION_PENDING":
-            oid = request["order"]
-
-        elif request["action"] == "TRADE_ACTION_SLTP":
-            pass
-
-        elif request["action"] == "TRADE_ACTION_MODIFY":
-            pass
-
-        elif request["action"] == "TRADE_ACTION_REMOVE":
-            pass
-
-        elif request["action"] == "TRADE_ACTION_CLOSE_BY":
-            pass
-        else:
-            return
-
-        # try:
-        #     oref = self._ordersrev.pop(oid)
-        # except KeyError:
-        #     raise KeyError(oid)
-
+    def _transaction(self, transaction):
+        oid = transaction["order"]
         if oid in self._orders.values():
             # when an order id exists process transaction
-            self._process_transaction(oid, request, reply)
-        else:
-            # external order created this transaction
-            if self._cancel_flag and reply["result"] == "TRADE_RETCODE_DONE":
-                self._cancel_flag = False
+            self._process_transaction(oid, transaction)
+            return
 
-                size = float(reply["volume"])
-                price = float(reply["price"])
-                if request["type"].endswith("_SELL"):
-                    size = -size
-                for data in self.datas:
-                    if data._name == request["symbol"]:
-                        self.broker._fill_external(data, size, price)
-                        break
+        oid = transaction["position"]
+        if oid in self._orders.values():
+            if transaction["order_state"] not in ["ORDER_STATE_FILLED"]:
+                return
+            # when an order id exists process transaction
+            self._process_transaction(oid, transaction)
+            return
 
-    def _process_transaction(self, oid, request, reply):
+        # external order created this transaction
+        if self._cancel_flag and transaction["type"] == "TRADE_TRANSACTION_ORDER_ADD":
+            self._cancel_flag = False
+
+            size = float(transaction["volume"])
+            price = float(transaction["price"])
+            if "SELL" in transaction["order_type"]:
+                size = -size
+            for data in self.datas:
+                if data._name == transaction["symbol"]:
+                    self.broker._fill_external(data, size, price)
+                    break
+
+    def _process_transaction(self, oid, transaction):
         try:
             # get a reference to a backtrader order based on the order id / trade id
             oref = self._ordersrev[oid]
         except KeyError:
             return
 
-        if request["action"] == "TRADE_ACTION_PENDING":
-            pass
+        if "order_state" in transaction:
+            state = transaction["order_state"]
 
-        if reply["result"] == "TRADE_RETCODE_DONE":
-            size = float(reply["volume"])
-            price = float(reply["price"])
-            if request["type"].endswith("_SELL"):
-                size = -size
-            self.broker._fill(oref, size, price, reason=request["type"])
+            if state == "ORDER_STATE_STARTED":
+                self.broker._submit(oref)
+                return
+            elif state == "ORDER_STATE_PLACED":
+                self.broker._accept(oref)
+                return
+            elif state == "ORDER_STATE_CANCELED":
+                self.broker._cancel(oref)
+                return
+            elif state == "ORDER_STATE_PARTIAL" or state == "ORDER_STATE_FILLED":
+                size = float(transaction["volume"])
+                price = float(transaction["price"])
+                if "SELL" in transaction["order_type"]:
+                    size = -size
+                self.broker._fill(oref, size, price,
+                                  filled=state == "ORDER_STATE_FILLED")
+                return
+            elif state == "ORDER_STATE_REJECTED":
+                self.broker._reject(oref)
+                return
+            elif state == "ORDER_STATE_EXPIRED":
+                self.broker._expire(oref)
+                return
+
+        # if reply["result"] == "TRADE_RETCODE_DONE":
+        #     size = float(reply["volume"])
+        #     price = float(reply["price"])
+        #     if request["type"].endswith("_SELL"):
+        #         size = -size
+        #     self.broker._fill(oref, size, price, reason=request["type"])
 
     def config_chart(self, chartId, dataname, timeframe, compression):
         """Opens a chart window in MT5"""
@@ -811,7 +799,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise ChartError(ret_val["description"])
             self.put_notification(ret_val["description"])
 
@@ -832,7 +820,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise ChartError(ret_val["description"])
             self.put_notification(ret_val["description"])
 
@@ -874,7 +862,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise ChartError(ret_val["description"])
             self.put_notification(ret_val["description"])
 
@@ -903,7 +891,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise IndicatorError(ret_val["description"])
             self.put_notification(ret_val["description"])
 
@@ -914,8 +902,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
     ):
         """Recieves values from a MT5 indicator instance"""
 
-        if self.debug:
-            print(
+        logger.debug(
                 "Req. indicator data with Timestamp: {}, Indicator Id: {}".format(
                     datetime.utcfromtimestamp(float(fromDate)), id
                 )
@@ -926,7 +913,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise IndicatorError(ret_val["description"])
             self.put_notification(ret_val["description"])
             if ret_val["lastError"] == "4806":
@@ -942,7 +929,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         ret_val = self.oapi.construct_and_send(action="RESET")
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise ServerConfigError(ret_val["description"])
             self.put_notification(ret_val["description"])
 
@@ -977,8 +964,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         tf = self.get_granularity(timeframe, compression)
 
-        if self.debug:
-            print(
+        logger.debug(
                 "Request CSV write with Fetching: {}, Timeframe: {}, Fromdate: {}".format(
                     symbol, tf, date_begin
                 )
@@ -994,7 +980,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         )
 
         if ret_val["error"]:
-            print(ret_val)
+            logger.error(ret_val)
             raise ServerConfigError(ret_val["description"])
             self.put_notification(ret_val["description"])
         else:

@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import collections
+import logging
 
 from backtrader import BrokerBase, Order, BuyOrder, SellOrder
 from backtrader.utils.py3 import with_metaclass
@@ -9,6 +10,7 @@ from backtrader.position import Position
 
 from backtradermql5 import mt5store
 
+logger = logging.getLogger("MT5Broker")
 
 class MTraderCommInfo(CommInfoBase):
     def getvaluesize(self, size, price):
@@ -64,11 +66,13 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self.startingcash = self.cash = 0.0
         self.startingvalue = self.value = 0.0
         self.positions = collections.defaultdict(Position)
-        self.addcommissioninfo(self, MTraderCommInfo(mult=1.0, stocklike=False))
+        self.addcommissioninfo(
+            self, MTraderCommInfo(mult=1.0, stocklike=False))
 
     def start(self):
         super(MTraderBroker, self).start()
-        self.addcommissioninfo(self, MTraderCommInfo(mult=1.0, stocklike=False))
+        self.addcommissioninfo(
+            self, MTraderCommInfo(mult=1.0, stocklike=False))
         self.o.start(broker=self)
         # Check MetaTrader account
         self.o.check_account()
@@ -157,8 +161,16 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
     def _submit(self, oref):
         order = self.orders[oref]
+        if order.status == Order.Submitted:
+            return
+
         order.submit(self)
         self.notify(order)
+        # submit for stop order and limit order of bracket
+        bracket = self.brackets.get(oref, [])
+        for o in bracket:
+            if o.ref != oref:
+                self._submit(o.ref)
 
     def _reject(self, oref):
         order = self.orders[oref]
@@ -169,12 +181,22 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
     def _accept(self, oref):
         order = self.orders[oref]
+        if order.status == Order.Accepted:
+            return
+
         order.accept()
         self.notify(order)
-        self._ococheck(order)
+        # accept for stop order and limit order of bracket
+        bracket = self.brackets.get(oref, [])
+        for o in bracket:
+            if o.ref != oref:
+                self._accept(o.ref)
 
     def _cancel(self, oref):
         order = self.orders[oref]
+        if order.status == Order.Canceled:
+            return
+
         order.cancel()
         self.notify(order)
         self._bracketize(order, cancel=True)
@@ -210,11 +232,14 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
                     self._cancel(o.ref)
 
     def _ococheck(self, order):
-        ocoref = self._ocos.get(order.ref, order.ref) # a parent or self
+        ocoref = self._ocos.pop(order.ref, order.ref)  # a parent or self
         ocol = self._ocol.pop(ocoref, None)
         if ocol:
+            # cancel all order in oco group
             for oref in ocol:
-                self._cancel(oref)
+                o = self.orders.get(oref, None)
+                if o is not None and o.ref != order.ref:
+                    self.cancel(o)
 
     def _ocoize(self, order, oco):
         if oco is None:
@@ -223,10 +248,12 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         ocoref = oco.ref
         oref = order.ref
         if ocoref not in self._ocos:
-            self._ocos[ocoref] = ocoref
+            self._ocos[oref] = ocoref
+            self._ocol[ocoref].append(ocoref)  # add to group
         self._ocol[ocoref].append(oref)  # add to group
 
     def _fill_external(self, data, size, price):
+        logger.debug("Fill external order", data, size, price)
         if size == 0:
             return
 
@@ -249,8 +276,13 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
         order.completed()
         self.notify(order)
+        self._ococheck(order)
 
-    def _fill(self, oref, size, price, reason, **kwargs):
+    def _fill(self, oref, size, price, filled=False, **kwargs):
+        if size == 0 and not filled:
+            return
+        logger.debug("Fill order", oref, size, price)
+
         order = self.orders[oref]
         if not order.alive():  # can be a bracket
             pref = getattr(order.parent, "ref", order.ref)
@@ -258,26 +290,30 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
                 msg = (
                     "Order fill received for {}, with price {} and size {} "
                     "but order is no longer alive and is not a bracket. "
-                    "Unknown situation {}"
-                )
-                msg = msg.format(order.ref, price, size, reason)
+                    "Unknown situation"
+                ).format(order.ref, price, size)
                 self.o.put_notification(msg)
                 return
 
             # [main, stopside, takeside], neg idx to array are -3, -2, -1
-            if reason == "STOP_LOSS_ORDER":
-                order = self.brackets[pref][-2]
-            elif reason == "TAKE_PROFIT_ORDER":
-                order = self.brackets[pref][-1]
+            stop_order = self.brackets[pref][-2]
+            limit_order = self.brackets[pref][-1]
+
+            # order type SELL, then stop and limit type BUY
+            if stop_order.size > 0 and limit_order.size > 0:
+                if price >= limit_order.price:  # Buy ask price, so price > limit price
+                    order = limit_order
+                else:
+                    order = stop_order
+            # order type BUY, then stop and limit type SELL
             else:
-                msg = (
-                    "Order fill received for {}, with price {} and size {} "
-                    "but order is no longer alive and is a bracket. "
-                    "Unknown situation {}"
-                )
-                msg = msg.format(order.ref, price, size, reason)
-                self.o.put_notification(msg)
-                return
+                if price <= limit_order.price:  # Sell bid price, so price < limit price
+                    order = limit_order
+                else:
+                    order = stop_order
+
+        if filled:
+            size = order.size
 
         data = order.data
         pos = self.getposition(data, clone=False)
@@ -311,6 +347,8 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             order.completed()
             self.notify(order)
             self._bracketize(order)
+
+        self._ococheck(order)
 
     def _transmit(self, order):
         oref = order.ref
