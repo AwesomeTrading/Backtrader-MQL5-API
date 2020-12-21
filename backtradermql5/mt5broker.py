@@ -12,6 +12,7 @@ from backtradermql5 import mt5store
 
 logger = logging.getLogger("MT5Broker")
 
+
 class MTraderCommInfo(CommInfoBase):
     def getvaluesize(self, size, price):
         # In real life the margin approaches the price
@@ -48,7 +49,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
     # TODO: close positions
 
-    params = (("use_positions", True),)
+    params = (("use_positions", True), )
 
     def __init__(self, **kwargs):
         super(MTraderBroker, self).__init__()
@@ -66,13 +67,13 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self.startingcash = self.cash = 0.0
         self.startingvalue = self.value = 0.0
         self.positions = collections.defaultdict(Position)
-        self.addcommissioninfo(
-            self, MTraderCommInfo(mult=1.0, stocklike=False))
+        self.addcommissioninfo(self, MTraderCommInfo(mult=1.0,
+                                                     stocklike=False))
 
     def start(self):
         super(MTraderBroker, self).start()
-        self.addcommissioninfo(
-            self, MTraderCommInfo(mult=1.0, stocklike=False))
+        self.addcommissioninfo(self, MTraderCommInfo(mult=1.0,
+                                                     stocklike=False))
         self.o.start(broker=self)
         # Check MetaTrader account
         self.o.check_account()
@@ -253,7 +254,8 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self._ocol[ocoref].append(oref)  # add to group
 
     def _fill_external(self, data, size, price):
-        logger.debug("Fill external order: {}, {}, {}".format(data, size, price))
+        logger.debug("Fill external order: {}, {}, {}".format(
+            data, size, price))
         if size == 0:
             return
 
@@ -261,37 +263,40 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         pos.update(size, price)
 
         if size < 0:
-            order = SellOrder(
-                data=data, size=size, price=price, exectype=Order.Market, simulated=True
-            )
+            order = SellOrder(data=data,
+                              size=size,
+                              price=price,
+                              exectype=Order.Market,
+                              simulated=True)
         else:
-            order = BuyOrder(
-                data=data, size=size, price=price, exectype=Order.Market, simulated=True
-            )
+            order = BuyOrder(data=data,
+                             size=size,
+                             price=price,
+                             exectype=Order.Market,
+                             simulated=True)
 
         order.addcomminfo(self.getcommissioninfo(data))
-        order.execute(
-            0, size, price, 0, 0.0, 0.0, size, 0.0, 0.0, 0.0, 0.0, size, price
-        )
-
+        order.execute(0, size, price, 0, 0.0, 0.0, size, 0.0, 0.0, 0.0, 0.0,
+                      size, price)
         order.completed()
+
         self.notify(order)
         self._ococheck(order)
+        self.o.get_balance()
 
     def _fill(self, oref, size, price, filled=False, **kwargs):
         if size == 0 and not filled:
             return
-        logger.debug("Fill order: {}, {}, {}".format(oref, size, price, filled))
+        logger.debug("Fill order: {}, {}, {}".format(oref, size, price,
+                                                     filled))
 
         order = self.orders[oref]
         if not order.alive():  # can be a bracket
             pref = getattr(order.parent, "ref", order.ref)
             if pref not in self.brackets:
-                msg = (
-                    "Order fill received for {}, with price {} and size {} "
-                    "but order is no longer alive and is not a bracket. "
-                    "Unknown situation"
-                ).format(order.ref, price, size)
+                msg = ("Order fill received for {}, with price {} and size {} "
+                       "but order is no longer alive and is not a bracket. "
+                       "Unknown situation").format(order.ref, price, size)
                 self.o.put_notification(msg)
                 return
 
@@ -349,6 +354,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             self._bracketize(order)
 
         self._ococheck(order)
+        self.o.get_balance()
 
     def _transmit(self, order):
         oref = order.ref
@@ -375,23 +381,21 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self.opending[pref].append(order)
         return order
 
-    def buy(
-        self,
-        owner,
-        data,
-        size,
-        price=None,
-        plimit=None,
-        exectype=None,
-        valid=None,
-        tradeid=0,
-        oco=None,
-        trailamount=None,
-        trailpercent=None,
-        parent=None,
-        transmit=True,
-        **kwargs
-    ):
+    def buy(self,
+            owner,
+            data,
+            size,
+            price=None,
+            plimit=None,
+            exectype=None,
+            valid=None,
+            tradeid=0,
+            oco=None,
+            trailamount=None,
+            trailpercent=None,
+            parent=None,
+            transmit=True,
+            **kwargs):
 
         order = BuyOrder(
             owner=owner,
@@ -413,23 +417,21 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self._ocoize(order, oco)
         return self._transmit(order)
 
-    def sell(
-        self,
-        owner,
-        data,
-        size,
-        price=None,
-        plimit=None,
-        exectype=None,
-        valid=None,
-        tradeid=0,
-        oco=None,
-        trailamount=None,
-        trailpercent=None,
-        parent=None,
-        transmit=True,
-        **kwargs
-    ):
+    def sell(self,
+             owner,
+             data,
+             size,
+             price=None,
+             plimit=None,
+             exectype=None,
+             valid=None,
+             tradeid=0,
+             oco=None,
+             trailamount=None,
+             trailpercent=None,
+             parent=None,
+             transmit=True,
+             **kwargs):
 
         order = SellOrder(
             owner=owner,
