@@ -507,15 +507,11 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # if order.exectype == bt.Order.StopTrail:
         #     okwargs['distance'] = order.trailamount
 
-        # okwargs["comment"] = dict()
-
         if stopside is not None and stopside.price is not None:
             okwargs["stoploss"] = stopside.price
-            # okwargs["comment"]["stopside"] = stopside.ref
 
         if takeside is not None and takeside.price is not None:
             okwargs["takeprofit"] = takeside.price
-            # okwargs["comment"]["takeside"] = takeside.ref
 
         # set store backtrader order ref as MT5 order magic number
         okwargs["magic"] = order.ref
@@ -525,13 +521,6 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             order.ref,
             okwargs,
         ))
-
-        # # notify orders of being submitted
-        # self.broker._submit(order.ref)
-        # if stopside is not None and stopside.price is not None:
-        #     self.broker._submit(stopside.ref)
-        # if takeside is not None and takeside.price is not None:
-        #     self.broker._submit(takeside.ref)
 
         return order
 
@@ -560,7 +549,6 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
                 oid = o["order"]
 
             self._orders[oref] = oid
-            # self.broker._submit(oref)
 
             # keeps orders types
             self._orders_type[oref] = okwargs["actionType"]
@@ -594,12 +582,12 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
                 else:
                     self.cancel_order(oid, symbol)
             except Exception as e:
-                self.put_notification("Order not cancelled: {}, {}".format(
-                    oid, e))
+                self.put_notification(
+                    "Order not cancelled: ref={}, orderid={}, error={}".format(
+                        oref, oid, e))
                 continue
 
             self._cancel_flag = True
-            # self.broker._cancel(oref)
 
     def price_data(self,
                    dataname,
@@ -774,13 +762,6 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             elif state == "ORDER_STATE_EXPIRED":
                 self.broker._expire(oref)
                 return
-
-        # if reply["result"] == "TRADE_RETCODE_DONE":
-        #     size = float(reply["volume"])
-        #     price = float(reply["price"])
-        #     if request["type"].endswith("_SELL"):
-        #         size = -size
-        #     self.broker._fill(oref, size, price, reason=request["type"])
 
     def config_chart(self, chartId, dataname, timeframe, compression):
         """Opens a chart window in MT5"""

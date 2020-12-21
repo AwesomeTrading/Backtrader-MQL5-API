@@ -352,9 +352,9 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             order.completed()
             self.notify(order)
             self._bracketize(order)
+            self.o.get_balance()
 
         self._ococheck(order)
-        self.o.get_balance()
 
     def _transmit(self, order):
         oref = order.ref
