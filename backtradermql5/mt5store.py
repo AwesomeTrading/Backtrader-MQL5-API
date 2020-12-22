@@ -426,10 +426,11 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             bal = self.oapi.construct_and_send(action="BALANCE")
         except Exception as e:
             self.put_notification(e)
-        # TODO: error handling
-        # if bal['error']:
-        #     self.put_notification(bal)
-        #     continue
+
+        if bal.get('error', False):
+            self.put_notification(bal)
+            raise ServerDataError(bal)
+
         try:
             self._cash = float(bal["balance"])
             self._value = float(bal["equity"])
