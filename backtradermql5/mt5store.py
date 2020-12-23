@@ -11,7 +11,7 @@ from backtrader.metabase import MetaParams
 from backtrader.utils.py3 import queue, with_metaclass
 from backtrader import date2num, num2date
 
-from backtradermql5.adapter import PositionAdapter
+from backtradermql5.adapter import OrderAdapter, PositionAdapter
 
 logger = logging.getLogger("MT5Store")
 
@@ -375,13 +375,59 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             # For datas simulate a queue with None to kickstart co
             self.datas.append(data)
 
-            if self.broker is not None:
-                self.broker.data_started(data)
+            # if self.broker is not None:
+            #     self.broker.data_started(data)
 
         elif broker is not None:
             self.broker = broker
             self.broker_threads()
             self.streaming_events()
+
+    def live(self):
+        self.broker.live()
+
+    def rebuild_order(self, order, oid):
+        side = "buy" if order.isbuy() else "sell"
+        order_type = self._ORDEREXECS.get((order.exectype, side), None)
+        if order_type is None:
+            raise ValueError("Wrong order type: %s or side: %s" %
+                             (order.exectype, side))
+        oref = order.ref
+        self._orders[oref] = oid
+        # keeps orders types
+        self._orders_type[oref] = order_type
+        # maps ids to backtrader order
+        self._ordersrev[oid] = oref
+
+    def refresh(self):
+        """
+        Check if order is alive when server is disconnect and reconnect
+        """
+        # TODO Using order ref insteal of order id
+        serverorders = dict((o.id, o) for o in self.o.get_orders())
+        for order in self.broker.orders:
+            if not order.alive():
+                continue
+
+            # TODO Using order ref insteal of order id
+            oid = self._orders[order.ref]
+            if not oid:
+                continue
+
+            sorder = serverorders.pop(oid, None)
+            if sorder is None:
+                logger.warn("Order ref(%d) not found on server", order.ref)
+                continue
+
+            state = sorder["state"]
+            price = float(sorder["price"])
+            size = float(sorder["volume"])
+            if "SELL" in sorder["type"]:
+                size = -size
+            self._process_order(oref=order.ref,
+                                state=state,
+                                size=size,
+                                price=price)
 
     def stop(self):
         # signal end of thread
@@ -398,13 +444,41 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         return [x for x in iter(self.notifs.popleft, None)]
 
     def get_positions(self):
-        positions = self.oapi.construct_and_send(action="POSITIONS")
+        response = self.oapi.construct_and_send(action="POSITIONS")
         # Error handling
-        # if positions["error"]:
-        #     raise ServerDataError(positions)
-        pos_list = positions.get("positions", [])
-        logger.debug("Open positions: {}".format(pos_list))
-        return [PositionAdapter(o) for o in pos_list]
+        if response.get("error", False):
+            raise ServerDataError(response)
+
+        positions = response.get("positions", [])
+        logger.debug("Open positions: {}".format(positions))
+        return [PositionAdapter(o) for o in positions]
+
+    def get_orders(self):
+        response = self.oapi.construct_and_send(action="ORDERS")
+        # Error handling
+        if response.get("error", False):
+            raise ServerDataError(response)
+
+        orders = response.get("orders", [])
+        logger.debug("Open orders: {}".format(orders))
+        return [OrderAdapter(o) for o in orders]
+
+    def get_order(self, ref=None, oid=None):
+        if oid is None:
+            if ref is None:
+                raise Exception("Order ref or oid must provice")
+            oid = self._orders[ref]
+            if not oid:
+                raise Exception("Order ref %d found" % ref)
+
+        response = self.oapi.construct_and_send(action="ORDER", id=oid)
+        # Error handling
+        if response.get("error", False):
+            raise ServerDataError(response)
+
+        order = response.get("order", None)
+        logger.debug("Get order: {}".format(order))
+        return OrderAdapter(order)
 
     def get_granularity(self, frame, compression):
         granularity = self._GRANULARITIES.get((frame, compression), None)
@@ -426,10 +500,11 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
             bal = self.oapi.construct_and_send(action="BALANCE")
         except Exception as e:
             self.put_notification(e)
+            return
 
-        if bal.get('error', False):
-            self.put_notification(bal)
-            raise ServerDataError(bal)
+        # if bal.get('error', False):
+        #     self.put_notification(bal)
+        #     raise ServerDataError(bal)
 
         try:
             self._cash = float(bal["balance"])
@@ -508,14 +583,24 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         # if order.exectype == bt.Order.StopTrail:
         #     okwargs['distance'] = order.trailamount
 
+        comment = dict(ref=order.ref)
+
         if stopside is not None and stopside.price is not None:
             okwargs["stoploss"] = stopside.price
+            comment["sl"] = stopside.ref
 
         if takeside is not None and takeside.price is not None:
             okwargs["takeprofit"] = takeside.price
+            comment["tp"] = takeside.ref
 
+        # OCO
+        if order.oco is not None:
+            comment["oco"] = order.oco.ref
+
+        okwargs["comment"] = "|".join(
+            ["%s=%s" % (k, v) for k, v in comment.items()])
         # set store backtrader order ref as MT5 order magic number
-        okwargs["magic"] = order.ref
+        # okwargs["magic"] = order.ref
 
         okwargs.update(**kwargs)  # anything from the user
         self.q_ordercreate.put((
@@ -687,7 +772,7 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
         logger.debug(conf)
 
     def cancel_order(self, oid, symbol):
-        logger.debug("Cancelling order: {}, on symbol: {}".format(oid, symbol))
+        logger.debug("Cancelling order: %d, on symbol: %s", (oid, symbol))
 
         conf = self.oapi.construct_and_send(action="TRADE",
                                             actionType="ORDER_CANCEL",
@@ -737,32 +822,35 @@ class MTraderStore(with_metaclass(MetaSingleton, object)):
 
         if "order_state" in transaction:
             state = transaction["order_state"]
+            price = float(transaction["price"])
+            size = float(transaction["volume"])
+            if "SELL" in transaction["order_type"]:
+                size = -size
 
-            if state == "ORDER_STATE_STARTED":
-                self.broker._submit(oref)
-                return
-            elif state == "ORDER_STATE_PLACED":
-                self.broker._accept(oref)
-                return
-            elif state == "ORDER_STATE_CANCELED":
-                self.broker._cancel(oref)
-                return
-            elif state == "ORDER_STATE_PARTIAL" or state == "ORDER_STATE_FILLED":
-                size = float(transaction["volume"])
-                price = float(transaction["price"])
-                if "SELL" in transaction["order_type"]:
-                    size = -size
-                self.broker._fill(oref,
-                                  size,
-                                  price,
-                                  filled=state == "ORDER_STATE_FILLED")
-                return
-            elif state == "ORDER_STATE_REJECTED":
-                self.broker._reject(oref)
-                return
-            elif state == "ORDER_STATE_EXPIRED":
-                self.broker._expire(oref)
-                return
+            self._process_order(oref=oref, state=state, size=size, price=price)
+
+    def _process_order(self, oref, state, size=0, price=0):
+        if state == "ORDER_STATE_STARTED":
+            self.broker._submit(oref)
+            return
+        if state == "ORDER_STATE_PLACED":
+            self.broker._accept(oref)
+            return
+        if state == "ORDER_STATE_CANCELED":
+            self.broker._cancel(oref)
+            return
+        if state == "ORDER_STATE_PARTIAL" or state == "ORDER_STATE_FILLED":
+            self.broker._fill(oref,
+                              size,
+                              price,
+                              filled=state == "ORDER_STATE_FILLED")
+            return
+        if state == "ORDER_STATE_REJECTED":
+            self.broker._reject(oref)
+            return
+        if state == "ORDER_STATE_EXPIRED":
+            self.broker._expire(oref)
+            return
 
     def config_chart(self, chartId, dataname, timeframe, compression):
         """Opens a chart window in MT5"""

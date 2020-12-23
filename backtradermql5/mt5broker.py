@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import collections
+import itertools
 import logging
 
 from backtrader import BrokerBase, Order, BuyOrder, SellOrder
@@ -40,8 +41,8 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
     Params:
 
-      - `use_positions` (default:`False`): When connecting to the broker
-        provider use the existing positions to kickstart the broker.
+      - `rebuild` (default:`True`): When connecting to the broker
+        provider use the existing orders, positions to kickstart the broker.
 
         Set to `False` during instantiation to disregard any existing
         position
@@ -49,7 +50,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
 
     # TODO: close positions
 
-    params = (("use_positions", True), )
+    params = (("rebuild", True), )
 
     def __init__(self, **kwargs):
         super(MTraderBroker, self).__init__()
@@ -82,58 +83,210 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         self.startingcash = self.cash = self.o.get_cash()
         self.startingvalue = self.value = self.o.get_value()
 
-        if self.p.use_positions:
-            for p in self.o.get_positions():
-                # print('position for instrument:', p.symbol)
-                is_sell = p.type.endswith("_SELL")
-                size = float(p.volume)
-                if is_sell:
-                    size = -size
-                price = float(p.open)
+    def rebuild_environement(self):
+        """
+        Rebuild positions and orders when restart strategy
+        """
+        self.rebuild_positions()
+        self.rebuild_orders()
+
+    def rebuild_positions(self):
+        datas = dict((d._name, d) for d in self.o.datas)
+
+        for p in self.o.get_positions():
+            print('position for instrument:', p)
+            size = float(p.volume)
+            is_buy = p.type.endswith("_BUY")
+            if not is_buy:
+                size = -size
+            price = float(p.open)
+            if not self.positions[p.symbol]:
                 self.positions[p.symbol] = Position(size, price)
+            else:
+                self.positions[p.symbol].update(size, price)
 
-    def data_started(self, data):
-        pos = self.getposition(data)
+            data = datas.get(p.symbol, None)
+            if data is None:
+                logger.warn("data %s not found", p.symbol)
+                continue
 
-        if pos.size == 0:
-            return
+            # Info
+            info = p.comment
+            if "ref" in info:
+                Order.refbasis = itertools.count(info["ref"])
 
-        if pos.size < 0:
-            order = SellOrder(
+            # Parent order
+            PRClass = BuyOrder if is_buy else SellOrder
+            order = PRClass(
                 data=data,
-                size=pos.size,
-                price=pos.price,
+                size=float(p.volume),
+                price=float(p.open),
                 exectype=Order.Market,
+                transmit=p.stoploss <= 0 and p.takeprofit <= 0,
                 simulated=True,
             )
-        elif pos.size > 0:
-            order = BuyOrder(
+            pref = order.ref
+            self.orders[order.ref] = order
+            self.brackets[pref] = [order]
+            self.o.rebuild_order(order, p.id)
+
+            # Stoploss
+            if p.stoploss > 0:
+                if "sl" in info:
+                    Order.refbasis = itertools.count(info["sl"])
+
+                # opposite with position size
+                SLClass = SellOrder if is_buy else BuyOrder
+
+                slorder = SLClass(
+                    data=data,
+                    size=float(p.volume),
+                    price=float(p.stoploss),
+                    exectype=Order.Stop,
+                    parent=order,
+                    transmit=p.takeprofit <= 0,
+                    simulated=True,
+                )
+                self.orders[slorder.ref] = slorder
+                self.brackets[pref].append(slorder)
+
+            # Takeprofit
+            if p.takeprofit > 0:
+                if "tp" in info:
+                    Order.refbasis = itertools.count(info["tp"])
+
+                # opposite with position size
+                TPClass = SellOrder if is_buy else BuyOrder
+
+                tporder = TPClass(
+                    data=data,
+                    size=float(p.volume),
+                    price=float(p.takeprofit),
+                    exectype=Order.Limit,
+                    parent=order,
+                    transmit=True,
+                    simulated=True,
+                )
+                self.orders[tporder.ref] = tporder
+                self.brackets[pref].append(tporder)
+
+            # Submit order will auto submit bracket orders
+            self._submit(pref)
+
+            # complete parent order
+            order.addcomminfo(self.getcommissioninfo(data))
+            order.execute(0, order.size, order.price, 0, 0.0, 0.0, order.size,
+                          0.0, 0.0, 0.0, 0.0, order.size, order.price)
+            order.completed()
+            self.notify(order)
+            self._bracketize(order)
+            self._ococheck(order)
+
+    def rebuild_orders(self):
+        datas = dict((d._name, d) for d in self.o.datas)
+
+        for o in self.o.get_orders():
+            if o.state not in [
+                    "ORDER_STATE_STARTED",
+                    "ORDER_STATE_PLACED",
+                    "ORDER_STATE_PARTIAL",
+            ]:
+                continue
+
+            print('order for instrument:', o)
+            data = datas.get(o.symbol, None)
+            if not data:
+                logger.warn("data %s not found", o.symbol)
+                continue
+
+            is_buy = "BUY" in o.type
+
+            # Info
+            info = o.comment
+            if "ref" in info:
+                Order.refbasis = itertools.count(info["ref"])
+
+            # Parent order
+            PRClass = BuyOrder if is_buy else SellOrder
+            exectype = Order.Market
+            if o.type.endswith("_LIMIT"):
+                exectype = Order.Limit
+            elif o.type.endswith("_STOP"):
+                exectype = Order.Stop
+            elif o.type.endswith("STOP_LIMIT"):
+                exectype = Order.StopLimit
+
+            order = PRClass(
                 data=data,
-                size=pos.size,
-                price=pos.price,
-                exectype=Order.Market,
+                size=float(o.volume),
+                price=float(o.open),
+                exectype=exectype,
+                transmit=o.stoploss <= 0 and o.takeprofit <= 0,
                 simulated=True,
             )
+            pref = order.ref
+            self.orders[order.ref] = order
+            self.brackets[pref] = [order]
+            self.o.rebuild_order(order, o.id)
 
-        order.addcomminfo(self.getcommissioninfo(data))
-        order.execute(
-            0,
-            pos.size,
-            pos.price,
-            0,
-            0.0,
-            0.0,
-            pos.size,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            pos.size,
-            pos.price,
-        )
+            # Stoploss
+            if o.stoploss > 0:
+                if "sl" in info:
+                    Order.refbasis = itertools.count(info["sl"])
+                # opposite with order size
+                SLClass = SellOrder if is_buy else BuyOrder
 
-        order.completed()
-        self.notify(order)
+                slorder = SLClass(
+                    data=data,
+                    size=float(o.volume),
+                    price=float(o.stoploss),
+                    exectype=Order.Stop,
+                    parent=order,
+                    transmit=o.takeprofit <= 0,
+                    simulated=True,
+                )
+                self.orders[slorder.ref] = slorder
+                self.brackets[pref].append(slorder)
+
+            # Takeprofit
+            if o.takeprofit > 0:
+                if "tp" in info:
+                    Order.refbasis = itertools.count(info["tp"])
+                # opposite with order size
+                TPClass = SellOrder if is_buy else BuyOrder
+
+                tporder = TPClass(
+                    data=data,
+                    size=float(o.volume),
+                    price=float(o.takeprofit),
+                    exectype=Order.Limit,
+                    parent=order,
+                    transmit=True,
+                    simulated=True,
+                )
+                self.orders[tporder.ref] = tporder
+                self.brackets[pref].append(tporder)
+
+            # OCO
+            if "oco" in info:
+                ocoref = info["oco"]
+                oco = self.orders.get(ocoref, None)
+                order.oco = oco
+
+                self._ocoize(order)
+                if oco is None:  # Canceled
+                    self.cancel(order)
+                elif not oco.alive():
+                    self._ococheck(oco)
+
+            # Submit order will auto submit bracket orders
+            self._submit(pref)
+
+    def live(self):
+        # First time live data
+        if self.p.rebuild:
+            self.rebuild_environement()
+            self.p.rebuild = False
 
     def stop(self):
         super(MTraderBroker, self).stop()
@@ -233,6 +386,8 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
                     self._cancel(o.ref)
 
     def _ococheck(self, order):
+        if order.alive():
+            raise Exception("Should not be called here")
         ocoref = self._ocos.pop(order.ref, order.ref)  # a parent or self
         ocol = self._ocol.pop(ocoref, None)
         if ocol:
@@ -242,11 +397,11 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
                 if o is not None and o.ref != order.ref:
                     self.cancel(o)
 
-    def _ocoize(self, order, oco):
-        if oco is None:
+    def _ocoize(self, order):
+        if order.oco is None:
             return
 
-        ocoref = oco.ref
+        ocoref = order.oco.ref
         oref = order.ref
         if ocoref not in self._ocos:
             self._ocos[oref] = ocoref
@@ -304,15 +459,15 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             stop_order = self.brackets[pref][-2]
             limit_order = self.brackets[pref][-1]
 
-            # order type SELL, then stop and limit type BUY
-            if stop_order.size > 0 and limit_order.size > 0:
-                if price <= limit_order.price:  # Limit order trigger when ask price under limit price
+            # order type BUY, then stop and limit type SELL
+            if order.ordtype == Order.Buy:
+                if price >= limit_order.price:  # Limit order trigger when bid price over limit price
                     order = limit_order
                 else:
                     order = stop_order
-            # order type BUY, then stop and limit type SELL
+            # order type SELL, then stop and limit type BUY
             else:
-                if price >= limit_order.price:  # Limit order trigger when bid price over limit price
+                if price <= limit_order.price:  # Limit order trigger when ask price under limit price
                     order = limit_order
                 else:
                     order = stop_order
@@ -323,27 +478,16 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         data = order.data
         pos = self.getposition(data, clone=False)
         psize, pprice, opened, closed = pos.update(size, price)
-        comminfo = self.getcommissioninfo(data)
+        # comminfo = self.getcommissioninfo(data)
 
         closedvalue = closedcomm = 0.0
         openedvalue = openedcomm = 0.0
         margin = pnl = 0.0
 
-        order.execute(
-            data.datetime[0],
-            size,
-            price,
-            closed,
-            closedvalue,
-            closedcomm,
-            opened,
-            openedvalue,
-            openedcomm,
-            margin,
-            pnl,
-            psize,
-            pprice,
-        )
+        order.addcomminfo(self.getcommissioninfo(data))
+        order.execute(data.datetime[0], size, price, closed, closedvalue,
+                      closedcomm, opened, openedvalue, openedcomm, margin, pnl,
+                      psize, pprice)
 
         if order.executed.remsize:
             order.partial()
@@ -406,6 +550,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             exectype=exectype,
             valid=valid,
             tradeid=tradeid,
+            oco=oco,
             trailamount=trailamount,
             trailpercent=trailpercent,
             parent=parent,
@@ -413,8 +558,8 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         )
 
         order.addinfo(**kwargs)
-        order.addcomminfo(self.getcommissioninfo(data))
-        self._ocoize(order, oco)
+        # order.addcomminfo(self.getcommissioninfo(data))
+        self._ocoize(order)
         return self._transmit(order)
 
     def sell(self,
@@ -442,6 +587,7 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
             exectype=exectype,
             valid=valid,
             tradeid=tradeid,
+            oco=oco,
             trailamount=trailamount,
             trailpercent=trailpercent,
             parent=parent,
@@ -449,8 +595,8 @@ class MTraderBroker(with_metaclass(MetaMTraderBroker, BrokerBase)):
         )
 
         order.addinfo(**kwargs)
-        order.addcomminfo(self.getcommissioninfo(data))
-        self._ocoize(order, oco)
+        # order.addcomminfo(self.getcommissioninfo(data))
+        self._ocoize(order)
         return self._transmit(order)
 
     def cancel(self, order):

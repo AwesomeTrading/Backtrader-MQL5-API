@@ -183,6 +183,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
                             self.fromdate = self.lines.datetime[-1]
 
                         self._st_start()
+                        self.o.refresh()
                         continue
 
                     if (
@@ -224,6 +225,7 @@ class MTraderData(with_metaclass(MetaMTraderData, DataBase)):
                 # Live is also wished - go for it
                 self._state = self._ST_LIVE
                 self.put_notification(self.LIVE)
+                self.o.live()
                 continue
 
             elif self._state == self._ST_FROM:
